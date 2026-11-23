@@ -41,7 +41,12 @@ jobs:
           npx expo prebuild --platform ios --clean --no-install
       - name: Pod install
         working-directory: PiBot/apps/mobile/ios
-        run: pod install
+        run: |
+          for i in 1 2 3 4 5; do
+            pod install && exit 0
+            echo "pod install attempt $i failed; retrying in $((i*30))s"; sleep $((i*30))
+          done
+          exit 1
       - name: xcodebuild
         working-directory: PiBot/apps/mobile/ios
         run: |
