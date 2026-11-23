@@ -1,0 +1,92 @@
+name: pibot-ios-unsigned
+on:
+  push:
+    branches: [devin/pibot-ios-build]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 120
+    env:
+      EXPO_NO_TELEMETRY: "1"
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+      PUPPETEER_SKIP_DOWNLOAD: "1"
+      CI: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: w01fb0ss/PiBot
+          ref: v0.0.3
+          path: PiBot
+      - name: Select newest Xcode
+        run: |
+          ls -d /Applications/Xcode*.app
+          X=$(ls -d /Applications/Xcode_*.app | grep -v -i beta | sort -V | tail -1)
+          sudo xcode-select -s "$X"
+          xcodebuild -version
+          sw_vers
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: PiBot/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: PiBot/.nvmrc
+      - name: Install deps
+        working-directory: PiBot
+        run: pnpm install --frozen-lockfile
+      - name: Expo prebuild
+        working-directory: PiBot/apps/mobile
+        run: |
+          unset PIBOT_IOS_SHARE_EXTENSION PIBOT_IOS_PUSH
+          npx expo prebuild --platform ios --clean --no-install
+      - name: Pod install
+        working-directory: PiBot/apps/mobile/ios
+        run: pod install
+      - name: xcodebuild
+        working-directory: PiBot/apps/mobile/ios
+        run: |
+          WS=$(ls -d *.xcworkspace | head -1); SCHEME="${WS%.xcworkspace}"
+          echo "workspace=$WS scheme=$SCHEME"
+          set -o pipefail
+          xcodebuild -workspace "$WS" -scheme "$SCHEME" -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee xcodebuild.log | grep -E "error:|warning: .*deprecated|\*\* BUILD" | tail -200
+      - name: Package IPA
+        working-directory: PiBot/apps/mobile/ios
+        run: |
+          APP=$(ls -d build/Build/Products/Release-iphoneos/*.app | head -1)
+          mkdir -p out/Payload && cp -R "$APP" out/Payload/
+          (cd out && zip -qry PiBot-0.0.3-ios-unsigned.ipa Payload)
+          P="$APP/Info.plist"
+          {
+            echo "commit=$(git -C $GITHUB_WORKSPACE/PiBot rev-parse HEAD)"
+            echo "xcode=$(xcodebuild -version | tr '\n' ' ')"
+            echo "sdk=$(xcrun --sdk iphoneos --show-sdk-version)"
+            echo "macos=$(sw_vers -productVersion)"
+            echo "app=$(basename "$APP")"
+            echo "bundle_id=$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$P")"
+            echo "version=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$P") ($(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$P"))"
+            echo "min_ios=$(/usr/libexec/PlistBuddy -c 'Print MinimumOSVersion' "$P")"
+            echo "archs=$(lipo -archs "$APP/$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$P")")"
+            echo "ipa_bytes=$(stat -f%z out/PiBot-0.0.3-ios-unsigned.ipa)"
+            echo "app_size=$(du -sh "$APP" | cut -f1)"
+            echo "plugins=$(ls "$APP/PlugIns" 2>/dev/null | tr '\n' ' ')"
+            echo "entitlements:"; codesign -d --entitlements - "$APP" 2>&1 | head -20 || true
+            echo "pods_deploy_target:"; grep -m1 "platform :ios" Podfile; grep -m3 IPHONEOS_DEPLOYMENT_TARGET *.xcodeproj/project.pbxproj
+          } | tee out/build-info.txt
+          shasum -a 256 out/PiBot-0.0.3-ios-unsigned.ipa | tee -a out/build-info.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PiBot-0.0.3-ios-unsigned
+          path: |
+            PiBot/apps/mobile/ios/out/PiBot-0.0.3-ios-unsigned.ipa
+            PiBot/apps/mobile/ios/out/build-info.txt
+          compression-level: 0
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: xcodebuild-log
+          path: PiBot/apps/mobile/ios/xcodebuild.log
+          if-no-files-found: ignore
